@@ -1,0 +1,110 @@
+version: "3.9"
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: enterprise_rag
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching and Celery
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # OpenTelemetry Collector (optional - for development)
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    command: ["--config=/etc/otel-collector-config.yml"]
+    volumes:
+      - ./otel-collector-config.yml:/etc/otel-collector-config.yml
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+      - "13133:13133" # Health check
+
+  # FastAPI Application
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/enterprise_rag
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+
+  # Celery Worker
+  celery:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: celery -A app.tasks.celery_tasks worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/enterprise_rag
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./backend:/app
+
+  # Celery Beat (Scheduler)
+  celery-beat:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: celery -A app.tasks.celery_tasks beat --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/enterprise_rag
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./backend:/app
+
+  # React Dashboard
+  dashboard:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+    depends_on:
+      - api
+    volumes:
+      - ./frontend/src:/app/src
+
+volumes:
+  postgres_data:
